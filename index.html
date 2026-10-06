@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<!-- 更新履歴 
+07/22 CSV自動読み込み化 -->
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>データ記録プログラム（3カラム版）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:sans-serif; background:#f0f2f5; padding:15px;}
+.container3 {
+  display: flex;
+  gap: 20px;
+  flex-wrap: nowrap; /* 折り返し禁止 */
+  justify-content: space-between; /* カラム間のスペース自動調整 */
+  overflow-x: auto; /* 横スクロール可能 */
+}
+.col {
+  background: #fff;
+  padding: 20px;
+  border-radius: 10px;
+  box-shadow: 0 0 10px rgba(0,0,0,0.1);
+  flex: 1 1 0;       /* 幅可変、最小0、最大自動 */
+  min-width: 0;      /* flex shrink の挙動安定化 */
+}
+.container4 {
+  display: flex;
+  margin-top: 20px;
+}
+
+.container4 .col {
+  flex: 1;           /* 幅100% */
+  min-width: 0;
+}
+
+input,select,button{width:100%; padding:6px; margin-bottom:10px;}
+.blue{color:blue;font-weight:bold;}
+.red{color:red;font-weight:bold;}
+.gray{color:gray;}
+.history{max-height:200px; overflow:auto; font-size:13px; background:#fafafa; padding:10px; border-radius:6px;}
+.small{font-size:12px; color:gray;}
+.stats{font-size:18px;margin-top:10px;}
+.avg{color:blue; font-weight:bold;}
+</style>
+</head>
+<body>
+
+<h1>データ記録プログラム（3カラム版）</h1>
+
+<div class="container3">
+
+<!-- 左カラム: 入力フォーム -->
+<div class="col">
+<h2>入力</h2>
+<input type="number" id="score" placeholder="スコア">
+<select id="level">
+<option>Thunder</option><option>Fast</option><option>Good</option><option>S</option>
+<option>A+</option><option>A</option><option>A-</option>
+<option>B+</option><option>B</option><option selected>None</option>
+</select>
+<input type="number" id="time" placeholder="入力時間(秒)" step="0.01">
+<input type="number" id="chars" placeholder="入力文字数">
+<input type="number" id="miss" placeholder="ミス入力数">
+<input type="number" id="wpm" placeholder="WPM" step="0.01">
+<input type="number" id="accuracy" placeholder="正確率(%)" step="0.01">
+
+<button onclick="saveData()">保存</button>
+<button onclick="clearForm()">フォームクリア</button>
+<button onclick="downloadCSV()">CSV保存</button>
+
+<hr>
+<h3>CSV読み込み</h3>
+<input type="file" id="csvFile" accept=".csv" onchange="loadCSV()">
+<button onclick="loadCSV()">CSV読み込み完了</button> <!-- ←これは削除してもOK -->
+</div>
+
+<!-- 中カラム: 前回比較 + 統計 -->
+<div class="col">
+<h2>前回比較</h2>
+<div id="comparison"></div>
+<h2>統計（中カラム）</h2>
+<div id="statsMiddle" class="stats"></div>
+</div>
+
+<!-- 右カラム: グラフ + 統計 -->
+<div class="col">
+<h2>スコア・WPM推移（最新10件）</h2>
+<canvas id="chart" height="200"></canvas>
+<h2>正確率推移（最新10件）</h2>
+<canvas id="accuracyChart" height="200"></canvas>
+<h2>統計（右カラム）</h2>
+<div id="statsRight" class="stats"></div>
+</div>
+</div>
+<!-- ここまで上段カラム -->
+
+<!-- 下段に4カラム目 -->
+<div class="container4">
+  <div class="col">
+    <h2>過去データ履歴</h2>
+    <div id="history" class="history"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+
+let historyData = [];
+
+const levelRank = {"Thunder":10,"Fast":9,"Good":8,"S":7,"A+":6,"A":5,"A-":4,"B+":3,"B":2,"None":1};
+
+/*
+// レベル数値から文字列変換、差分変換表記など
+function difflevel(a,b,good=true){
+  if(e===undefined) return "";	// デフォ空白を返す
+  const e = Math.round(a - b);	// a-bで前回との差を出す
+  if(e===0) return "";		// 差が0のとき空白を返す
+  const ok = good ? (e>0) : (e<0);	// 大きいとき、小さいとき
+  return `<span class="${ok?"blue":"red"}"></span>`;	// 大きいときに青、小さいときに赤字装飾
+}
+
+// 数字からレベル名を返す関数
+function getLevelName(number) {
+  const numberToLevel = Object.fromEntries(
+    Object.entries(levelRank).map(([key, value]) => [value, key])
+  );
+  return numberToLevel[number] || null; // 該当なしの場合は null
+}
+*/
+
+// 時間表示統一「n分n秒nn」
+function formatTime(seconds){
+  seconds = Number(seconds);
+  const m = Math.floor(seconds/60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.round((seconds - Math.floor(seconds)) * 100);
+  return `${m}分${s}秒${ms.toString().padStart(2,'0')}`;
+}
+
+// 差分n秒n表記
+function formatTimeDiff(current, previous , ok){
+  let diffSec = Number(current - previous);
+  const sign = diffSec > 0 ? "+" : "";
+
+  const abs = Math.abs(diffSec);
+
+  const mindiff = Math.floor(abs / 60);
+  const secdiff = Math.floor(abs % 60);
+  const msdiff = Math.round((abs - Math.floor(abs)) * 100)
+
+  if (mindiff > 0) {
+    return `<span class="${ok ? "blue" : "red"}">(${sign}${mindiff}分${secdiff}秒${msdiff})</span>`;
+  } else {
+    return `<span class="${ok ? "blue" : "red"}">(${sign}${secdiff}秒${msdiff})</span>`;
+  }
+}
+
+// 小数点2桁差分表示
+function diff(a,b,good=true){
+  if(b===undefined) return "";
+  const da = Number(a.toFixed(2));
+  const db = Number(b.toFixed(2));
+  const d = da - db;
+  if(d===0) return `<span class="gray">(±0.00)</span>`;
+  const ok = good ? (d>0) : (d<0);
+  return `<span class="${ok?"blue":"red"}">(${d>0?"+":""}${d.toFixed(2)})</span>`;
+}
+
+// スコア用整数差分表示
+function diffInt(a,b,good=true){
+  if(b===undefined) return "";
+  const d = Math.round(a - b);
+  if(d===0) return `<span class="gray">(±0)</span>`;
+  const ok = good ? (d>0) : (d<0);
+  return `<span class="${ok?"blue":"red"}">(${d>0?"+":""}${d})</span>`;
+}
+
+// フォームクリア
+function clearForm(){
+  score.value=""; level.value="None"; time.value=""; chars.value=""; miss.value=""; wpm.value=""; accuracy.value="";
+}
+
+// 保存
+function saveData(){
+  historyData.push({
+    date:new Date().toLocaleString(),
+    score:Number(score.value),
+    level:level.value,
+    time:Number(time.value),
+    chars:Number(chars.value),
+    miss:Number(miss.value),
+    wpm:Number(wpm.value),
+    accuracy:Number(accuracy.value)
+  });
+  clearForm(); // ★ 自動クリア
+  display();
+}
+
+// CSV保存
+function downloadCSV(){
+  let csv="日時,スコア,レベル,入力時間(秒),入力文字数,ミス入力数,WPM,正確率(%)\n";
+  historyData.forEach(d=>{
+    csv+=`${d.date},${d.score},${d.level},${d.time},${d.chars},${d.miss},${d.wpm},${d.accuracy}\n`;
+  });
+  const blob=new Blob([csv],{type:"text/csv"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="history.csv";
+  a.click();
+}
+
+// CSV読み込み
+function loadCSV(){
+  const file=document.getElementById("csvFile").files[0];
+  if(!file){ alert("CSVファイルを選択してください"); return; }
+  const reader = new FileReader();
+  reader.onload = function(e){
+    const text = e.target.result;
+    const lines = text.split("\n").slice(1);
+    lines.forEach(line=>{
+      if(!line.trim()) return;
+      const c=line.split(",");
+      historyData.push({
+        date:c[0],
+        score:Number(c[1]),
+        level:c[2],
+        time:Number(c[3]),
+        chars:Number(c[4]),
+        miss:Number(c[5]),
+        wpm:Number(c[6]),
+        accuracy:Number(c[7])
+      });
+    });
+    display();
+    alert("CSV読み込み完了");
+  };
+  reader.readAsText(file);
+}
+
+function display(){
+  const comp=document.getElementById("comparison");
+  const hist=document.getElementById("history");
+  const statsDiv=document.getElementById("stats");
+  
+  // 履歴表示
+  hist && (hist.innerHTML = historyData.map((d,i)=>`
+    <div>#${i+1} ${d.date}<br>
+    ${d.score.toFixed(2)}|${d.level}|${formatTime(d.time)}|${d.wpm.toFixed(2)}WPM|${d.accuracy.toFixed(2)}%<hr></div>
+  `).join(""));
+
+  // 平均値計算
+//  let avgScore=avgTime=avgChars=avgMiss=avgWpm=avgAcc=0;
+//avgLevel追加
+  let avgScore=avgTime=avgChars=avgMiss=avgWpm=avgAcc=avgLevel=0;
+  if(historyData.length>0){
+    const scores = historyData.map(d=>d.score);
+    const times = historyData.map(d=>d.time);
+    const charsList = historyData.map(d=>d.chars);
+    const missList = historyData.map(d=>d.miss);
+    const wpmList = historyData.map(d=>d.wpm);
+    const acc = historyData.map(d=>d.accuracy);
+    const levels = historyData.map(d=>levelRank[d.level]);
+
+    avgScore = (scores.reduce((a,b)=>a+b,0)/scores.length).toFixed(2);
+    avgTime = (times.reduce((a,b)=>a+b,0)/times.length).toFixed(2);
+    avgChars = (charsList.reduce((a,b)=>a+b,0)/charsList.length).toFixed(2);
+    avgMiss = (missList.reduce((a,b)=>a+b,0)/missList.length).toFixed(2);
+    avgWpm = (wpmList.reduce((a,b)=>a+b,0)/wpmList.length).toFixed(2);
+    avgAcc = (acc.reduce((a,b)=>a+b,0)/acc.length).toFixed(2);
+    avgLevel = (levels.reduce((a,b)=>a+b,0)/levels.length).toFixed(0);
+  }
+
+  // 前回比較
+  if(historyData.length < 2){
+    comp.innerHTML = "比較データ不足";
+  } else {
+    const l = historyData.at(-1);
+    const p = historyData.at(-2);
+
+    comp.innerHTML = `
+      <div class="small">前回: ${p.date}</div>
+      <div class="small">今回: ${l.date}</div>
+      <hr>
+      <div>スコア: ${l.score} ${diffInt(l.score, p.score,true)} <span class="small">平均値: ${avgScore}</span></div>
+      <div>レベル: ${l.level} ${diffInt(levelRank[l.level],levelRank[p.level],true)} <span class="small">平均値: ${avgLevel}</span></div>
+      <div>入力時間: ${formatTime(l.time)} ${formatTimeDiff(l.time,p.time)} <span class="small">平均値: ${formatTime(avgTime)}</span></div>
+      <div>入力文字数: ${l.chars} ${diffInt(l.chars,p.chars,true)} <span class="small">平均値: ${avgChars}</span></div>
+      <div>ミス入力数: ${l.miss} ${diffInt(l.miss,p.miss,false)} <span class="small">平均値: ${avgMiss}</span></div>
+      <div>WPM: ${l.wpm.toFixed(2)} ${diff(l.wpm,p.wpm,true)} <span class="small">平均値: ${avgWpm}</span></div>
+      <div>正確率: ${l.accuracy.toFixed(2)}% ${diff(l.accuracy,p.accuracy,true)} <span class="small">平均値: ${avgAcc}%</span></div>
+    `;
+  }
+// 削除したコード      <div>レベル: ${l.level} ${ranking(levelRank[l.level],levelRank[p.level],true)} <span class="small">平均値: ${ranking(avgLevel)}</span></div>
+
+  updateStats();
+  drawChart();
+  drawAccuracyChart();
+  displayHistory(); // 下段の履歴更新
+}
+
+// 統計表示（中カラム・右カラム両方）
+function updateStats(){
+  if(historyData.length===0) return;
+  const scores = historyData.map(d=>d.score);
+  const times = historyData.map(d=>d.time);
+  const wpmList = historyData.map(d=>d.wpm);
+  const acc = historyData.map(d=>d.accuracy);
+
+  const avgScore = (scores.reduce((a,b)=>a+b,0)/scores.length).toFixed(1);
+  const bestScore = Math.max(...scores);
+  const worstScore = Math.min(...scores);
+  const avgTime = (times.reduce((a,b)=>a+b,0)/times.length).toFixed(1);
+  const bestTime = Math.min(...times);
+  const worstTime = Math.max(...times);
+  const avgWpm = (wpmList.reduce((a,b)=>a+b,0)/wpmList.length).toFixed(1);
+  const avgAcc = (acc.reduce((a,b)=>a+b,0)/acc.length).toFixed(1);
+
+  // 中カラム統計
+  document.getElementById("statsMiddle").innerHTML=`
+    <div><strong>平均値</strong></div><div> スコア: ${avgScore}, 入力時間: ${formatTime(avgTime)},</div><div> <span class="avg">WPM: ${avgWpm}</span>, <span class="avg">正確率: ${avgAcc}%</span></div>
+    <strong>ベスト</strong><br> スコア: ${bestScore}, 最小入力時間: ${formatTime(bestTime)}<br>
+    <strong>ワースト</strong><br> スコア: ${worstScore}, 最大入力時間: ${formatTime(worstTime)}
+  `;
+
+  // 右カラム統計
+  document.getElementById("statsRight").innerHTML=`
+    <strong>平均値</strong> スコア: ${avgScore}, WPM: ${avgWpm}, 正確率: ${avgAcc}%<br>
+    <strong>ベスト</strong> スコア: ${bestScore}<br>
+    <strong>ワースト</strong> スコア: ${worstScore}
+  `;
+}
+
+// グラフ描画（スコア・WPM）
+let chartInstance=null;
+function drawChart(){
+  const ctx = document.getElementById('chart').getContext('2d');
+  if(chartInstance) chartInstance.destroy();
+  const dataSlice = historyData.slice(-10);
+  const labels = dataSlice.map((_,i)=>`#${historyData.length - dataSlice.length + i +1}`);
+  chartInstance = new Chart(ctx,{
+    type:'line',
+    data:{labels,datasets:[
+      {label:'スコア', data:dataSlice.map(d=>d.score), borderColor:'blue', fill:false, tension:0.2},
+      {label:'WPM', data:dataSlice.map(d=>d.wpm), borderColor:'green', fill:false, tension:0.2}
+    ]},
+    options:{
+      responsive:true,
+      plugins:{legend:{position:'bottom'}},
+      scales:{x:{title:{display:true,text:'ログ番号'}}, y:{min:200}}
+    }
+  });
+}
+
+// 正確率グラフ（90-100%）
+let accuracyChartInstance=null;
+function drawAccuracyChart(){
+  const ctx = document.getElementById('accuracyChart').getContext('2d');
+  if(accuracyChartInstance) accuracyChartInstance.destroy();
+  const dataSlice = historyData.slice(-10);
+  const labels = dataSlice.map((_,i)=>`#${historyData.length - dataSlice.length + i +1}`);
+  accuracyChartInstance = new Chart(ctx,{
+    type:'line',
+    data:{labels,datasets:[{label:'正確率(%)', data:dataSlice.map(d=>d.accuracy), borderColor:'red', fill:false, tension:0.2}]},
+    options:{
+      responsive:true,
+      plugins:{legend:{position:'bottom'}},
+      scales:{
+        x:{title:{display:true,text:'ログ番号'}},
+        y:{min:90,max:100,ticks:{stepSize:1, callback:v=>v+"%"}, grid:{color:'rgba(0,0,0,0.1)'}}
+      }
+    }
+  });
+}
+
+// 下段履歴表示用
+function displayHistory(){
+  const histDiv = document.getElementById("history");
+  if(!histDiv) return;
+
+// 追記ここから
+  const maxScore = Math.max(...historyData.map(d=>d.score));
+  const minScore = Math.min(...historyData.map(d=>d.score));
+  const maxWpm = Math.max(...historyData.map(d=>d.wpm));
+  const minWpm = Math.min(...historyData.map(d=>d.wpm));
+  const maxAcc = Math.max(...historyData.map(d=>d.accuracy));
+  const minAcc = Math.min(...historyData.map(d=>d.accuracy));
+  const minTime = Math.min(...historyData.map(d=>d.time));
+  const maxTime = Math.max(...historyData.map(d=>d.time));
+
+  const maxMiss = Math.max(...historyData.map(d=>d.miss));
+  const minMiss = Math.min(...historyData.map(d=>d.miss));
+//  const maxLevel = Math.max(...historyData.map(d=>d.level));
+//  const minLevel = Math.min(...historyData.map(d=>d.level));
+// ここまで
+
+  // テーブルヘッダ
+  let tableHTML = `
+    <table border="1" cellspacing="0" cellpadding="4" style="width:100%; border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>日時</th>
+          <th>スコア</th>
+          <th>レベル</th>
+          <th>入力時間</th>
+          <th>文字数</th>
+          <th>ミス</th>
+          <th>WPM</th>
+          <th>正確率</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  // データ行
+  historyData.forEach((d,i)=>{
+    tableHTML += `
+      <tr>
+        <td>${i+1}</td>
+        <td>${d.date}</td>
+        <td style="color:${d.score===maxScore?'blue':d.score===minScore?'red':'black'}">${d.score}</td>
+	<td>${d.level}</td>
+        <td style="color:${d.time===minTime?'blue':d.time===maxTime?'red':'black'}">${formatTime(d.time)}</td>
+        <td>${d.chars}</td>
+        <td style="color:${d.miss===minMiss?'blue':d.miss===maxMiss?'red':'black'}">${d.miss}</td>
+        <td style="color:${d.wpm===maxWpm?'blue':d.wpm===minWpm?'red':'black'}">${d.wpm.toFixed(2)}</td>
+        <td style="color:${d.accuracy===maxAcc?'blue':d.accuracy===minAcc?'red':'black'}">${d.accuracy.toFixed(2)}%</td>
+      </tr>
+    `;
+  });
+
+  tableHTML += `</tbody></table>`;
+
+  histDiv.innerHTML = tableHTML;
+}
+
+// 初期表示
+display();
+</script>
+
+</body>
+</html>
